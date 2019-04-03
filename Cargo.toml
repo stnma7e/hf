@@ -1,0 +1,16 @@
+[package]
+name = "hf"
+version = "0.1.0"
+authors = ["Sam Delmerico <svdelmerico@gmail.com>"]
+
+[dependencies]
+regex = "*"
+rand = "*"
+nalgebra = "0.16.0"
+lapack = "0.16.0"
+
+[dependencies.nalgebra-lapack]
+path = "nalgebra-lapack"
+# version = "0.5"
+default-features = false
+features = [ "netlib" ]
