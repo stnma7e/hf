@@ -7,10 +7,8 @@ authors = ["Sam Delmerico <svdelmerico@gmail.com>"]
 regex = "*"
 rand = "*"
 nalgebra = "0.16.0"
-lapack = "0.16.0"
 
-[dependencies.nalgebra-lapack]
-path = "nalgebra-lapack"
-# version = "0.5"
+[dependencies.lapack]
+version = "0.11"
 default-features = false
 features = [ "netlib" ]

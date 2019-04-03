@@ -1,19 +1,20 @@
+#![allow(non_snake_case)]
+
 extern crate regex;
-extern crate lapack;
 extern crate rand;
 extern crate nalgebra as na;
-extern crate nalgebra_lapack as nal;
+extern crate lapack;
 
 use std::io;
 use std::fs::File;
 use std::io::prelude::*;
 use regex::Regex;
 
-use lapack::*;
-
-use na::{Matrix, MatrixN, VectorN, ArrayStorage, U7, SymmetricEigen};
+use lapack::fortran::*;
+use na::{Matrix, MatrixN, VectorN, ArrayStorage, U7};
 
 type Mat77 = Matrix<f64, U7, U7, ArrayStorage<f64, U7, U7>>;
+type Vec7 = VectorN<f64, U7>;
 
 #[derive(Default, Debug)]
 struct Integrals {
@@ -26,14 +27,13 @@ struct Integrals {
 }
 
 impl Integrals {
+    /// Retuns two-electron integral for the given orbitals. Should obey 8-fold symmetry:
+    /// [pq|rs] = [qp|rs] = [pq|sr] = [qp|sr] = [rs|pq] = [sr|pq] = [rs|qp] = [sr|qp].
+    /// Where p >= q, and r >= s. And the integrals are ordered with pq orbitals first if
+    /// (p(p + 1)/2) + q > (r(r + 1)/2) + s, otherwise the rs orbitals are first.
     fn two_e(&self, mut u: usize, mut v: usize, mut p: usize, mut o: usize) -> f64 {
-        /// Retuns two-electron integral for the given orbitals. Should obey 8-fold symmetry:
-        /// [pq|rs] = [qp|rs] = [pq|sr] = [qp|sr] = [rs|pq] = [sr|pq] = [rs|qp] = [sr|qp].
-        /// Where p >= q, and r >= s. And the integrals are ordered with pq orbitals first if
-        /// (p(p + 1)/2) + q > (r(r + 1)/2) + s, otherwise the rs orbitals are first.
-
         // make sure u > v and p > o
-        let mut tmp = 0;
+        let mut tmp;
         if v > u {
             tmp = u;
             u = v; v = tmp;
@@ -56,26 +56,30 @@ impl Integrals {
 
 fn main() {
     let N = 6 + 1 + 1; // 8
-    let mut ints = get_integrals("h2oints.txt").unwrap();
+    let ints = get_integrals("h2oints.txt").unwrap();
     let S = Mat77::from_iterator(ints.overlap.iter().flatten().map(|i| i.clone()));
     let T = Mat77::from_iterator(ints.kinetic.iter().flatten().map(|i| i.clone()));
     let V = Mat77::from_iterator(ints.potential.iter().flatten().map(|i| i.clone()));
     let H = T + V;
 
-    let (U_S, L_S) = diag(&S);
+    let (U_S, L_S) = diag(S);
     let rootL_S = L_S.map(|x| if x > 0.0000001 {x.powf(-0.5)} else {0f64});
     let rootS = U_S * rootL_S * U_S.transpose();
 
     let F0 = rootS.transpose() * H * rootS;
-    let (U_F0, L_F0) = diag(&F0);
+    let (U_F0, _) = diag(F0);
     let mut C0 = rootS * U_F0;
+    let mut E_ref = 100000.0;
 
-    for i in 0..20 {
-        let (E, C, e) = scf(C0, &H, &rootS, N, &ints);
+    for i in 0..2000 {
+        let (E, C, _epsilon) = scf(C0, &H, &rootS, N, &ints);
+        println!("{} {}", i, E);
+        if E_ref - E < 10.0f64.powf(-6.0) {
+            return;
+        }
+
+        E_ref = E;
         C0 = C;
-        // if i  % 10 == 0 {
-            println!("{} {}", i, E);
-        // }
     }
 }
 
@@ -84,7 +88,7 @@ fn scf(C: Mat77, H: &Mat77, rootS: &Mat77, N: usize, ints: &Integrals) -> (f64, 
     for u in 0..7 {
         for v in 0..7 {
             for i in 0..N/2 {
-                D[u*7+v] += C[u*7+i] * C[v*7+i];
+                D[u+v*7] += C[u+i*7] * C[v+i*7];
             }
         }
     }
@@ -94,7 +98,7 @@ fn scf(C: Mat77, H: &Mat77, rootS: &Mat77, N: usize, ints: &Integrals) -> (f64, 
         for v in 0..7 {
             for p in 0..7 {
                 for o in 0..7 {
-                    F[u*7+v] += D[p*7+o] * (2.0*ints.two_e(u,v,p,o) - ints.two_e(u,p,v,o))
+                    F[u+v*7] += D[p+o*7] * (2.0*ints.two_e(u,v,p,o) - ints.two_e(u,p,v,o))
                 }
             }
         }
@@ -103,63 +107,26 @@ fn scf(C: Mat77, H: &Mat77, rootS: &Mat77, N: usize, ints: &Integrals) -> (f64, 
     let mut E = ints.Enuc;
     for u in 0..7 {
         for v in 0..7 {
-            E += D[u*7+v] * (H[u*7+v] + F[u*7+v])
+            E += D[u+v*7] * (H[u+v*7] + F[u+v*7])
         }
     }
 
-    let mut Fprime = rootS.transpose() * F * rootS;
-    is_sy(&Fprime);
-    diag_works(&Fprime);
-    let (Cprime, epsilon) = diag(&Fprime);
-    println!("{:?}\n{}\n{}", Fprime, Cprime, epsilon);
+    let Fprime = rootS.transpose() * F * rootS;
+    let (Cprime, epsilon) = diag(Fprime);
 
     return (E, rootS * Cprime, epsilon)
 }
 
-fn diag(F: &Mat77) -> (MatrixN<f64, U7>, MatrixN<f64, U7>) {
-    let F0_diag = SymmetricEigen::new(F.clone());
-    // the eigenvalues are unsorted, we should sort them and their corresponding eigenvectors
-    let mut vs_F0 = F0_diag.eigenvectors;
-    let mut ls_F0 = F0_diag.eigenvalues;
-    println!("{}\n{}", vs_F0, ls_F0);
-
-    let mut a = F.clone();
-    let mut a = a.as_mut_slice();
-    let mut w = vec![0f64; 7];
+fn diag(F: Mat77) -> (MatrixN<f64, U7>, MatrixN<f64, U7>) {
+    let mut a = F;   // eigenvector output
+    let mut w = Vec7::from_element(0f64); // eigenvalue output
     let mut work = vec![0f64; 49];
     let lwork = work.len() as i32;
     let mut info = 0;
 
-    unsafe {
-        dsyev(b'V', b'U', 7, &mut a, 7, &mut w, &mut work, lwork, &mut info);
-    }
+    dsyev(b'V', b'U', 7, &mut a.as_mut_slice(), 7, w.as_mut(), &mut work, lwork, &mut info);
 
-    let b = Mat77::from_row_slice(a);
-    println!("DSYEV\n{}", b);
-    println!("{:?}", w);
-
-    // bubble sort
-    let mut elementsToCheck = ls_F0.len();
-    let mut swaps = 1;
-    while swaps > 0 {
-        swaps = 0;
-        for i in 0..elementsToCheck - 1 {
-            if ls_F0[i] > ls_F0[i+1] {
-                // swap these values
-                let tmp = ls_F0[i+1];
-                ls_F0[i+1] = ls_F0[i];
-                ls_F0[i] = tmp;
-
-                vs_F0.swap_columns(i,i+1);
-
-                swaps += 1;
-            }
-        }
-
-        elementsToCheck -= 1;
-    }
-
-    return (vs_F0, Mat77::from_diagonal(&ls_F0))
+    return (a, Mat77::from_diagonal(&w))
 }
 
 fn get_integrals(filename: &str) -> io::Result<Integrals> {
@@ -172,9 +139,6 @@ fn get_integrals(filename: &str) -> io::Result<Integrals> {
     let lines = contents.lines().collect::<Vec<&str>>();
 
     let mut data = Integrals::default();
-    for i in 0..7 {
-
-    }
 
     for i in 0..lines.len() {
         match Enuc_re.captures(lines[i]) {
@@ -241,22 +205,6 @@ fn get_two_electron_integrals(lines: &[&str], two_e: &mut [[[[f64; 7]; 7]; 7]; 7
     }
 }
 
-fn is_sy(A: &Mat77) {
-    for i in 0..7 {
-        for j in 0..7 {
-            assert!(A[i*7 + j] - A[j*7 + i] < 0.0000001);
-        }
-    }
-}
-
-fn diag_works(A: &Mat77) {
-    let (P,D) = diag(&A);
-    let B = P*D*P.transpose();
-    for i in 0..49 {
-        assert!(A[i] - B[i] < 0.5, "{} {}\n{}\n{}\n{}\n{}\n{:?}", A[i], B[i], A, B, P, D, A);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,7 +219,7 @@ mod tests {
             }
         }
 
-        let (P,D) = diag(&A);
+        let (P,D) = diag(A.clone());
         let B = P*D*P.transpose();
         for i in 0..49 {
             assert!(A[i] - B[i] < 0.000001, "{} {}", A[i], B[i]);
