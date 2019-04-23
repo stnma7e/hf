@@ -12,3 +12,9 @@ nalgebra = "0.16.0"
 version = "0.11"
 default-features = false
 features = [ "netlib" ]
+
+# [dependencies.nalgebra-lapack]
+# path = "nalgebra-lapack"
+# # version = "0.5"
+# default-features = false
+# features = [ "netlib" ]
